@@ -1,0 +1,679 @@
+---
+title: "2016 Election Prediction Project"
+author: "Arthur Hla PSTAT 131"
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr::opts_chunk$set(tidy=TRUE)
+
+indent1 = '    '
+indent2 = paste(rep(indent1, 2), collapse='')
+indent3 = paste(rep(indent1, 3), collapse='')
+
+library(knitr)
+library(tidyverse)
+library(ggmap)
+library(maps)
+library(Rtsne)
+library(NbClust)
+library(tree)
+library(maptree)
+library(class)
+library(reshape2)
+library(scales)
+library(RColorBrewer)
+```
+
+# Background
+
+The presidential election in 2012 did not come as a surprise. Some correctly predicted the outcome of the election correctly including [Nate Silver](https://en.wikipedia.org/wiki/Nate_Silver), 
+and [many speculated his approach](https://www.theguardian.com/science/grrlscientist/2012/nov/08/nate-sliver-predict-us-election).
+
+Despite the success in 2012, the 2016 presidential election came as a 
+[big surprise](https://fivethirtyeight.com/features/the-polls-missed-trump-we-asked-pollsters-why/) 
+to many, and it was a clear example that even the current state-of-the-art technology can surprise us.
+
+Answer the following questions in one to two paragraphs for each.
+
+1. What makes voter behavior prediction (and thus election forecasting) a hard problem?
+Voter behavior is hard to predict because there is no accurate model and the best we can do to determine voter behavior is by taking demographics of the area. Even this fails to predict human behavior because even the slight factor can change one's decision totally. Demographics leaves a lot of variance unexplained. For example, cues we get from social interactions, impaired judgments, and anything from facial expression to an accidental statement in speech can overturn the decision making which ultimately affects the outcomes.
+
+2. What was unique to Nate Silver's approach in 2012 that allowed him to achieve good predictions?
+The uniqueness of Nate Silver's prediction is that he was able to minimize the variance of predicting voter's behavior using a different approach. He first created what he calls a nowcast which is a mathematical model of how people in the US states will vote if the election were held on any particular day. After that, he starts a timer where voting behavior will change with respect to time. Since as time goes on the there is more room for variance so he treats all of its uncertainties as a random component. Then he classifies that random component by classifying above 50% is the outcome that Obama would win. This is a good way to describe voters but he still has to connect it to polls and the election. 
+
+3. What went wrong in 2016? What do you think should be done to make future predictions better?
+In 2016, the final prediction was that Clinton had a 71% chance of winning but there was an error in the polls. We get our data from polls and make a prediction, but if the polls are missed then the predictions become skewed and bias. This is what happened in Tuesday's poll, where there was a large error than the expected 2 to 3 percent. The polls were underestimating Trump's winnings. To make prediction better, we need to better understand the poll's uncertainties and take them into account when doing our modeling, since if the data is wrong then our modeling is wrong. 
+
+# Data
+
+```{r data}
+election.raw = read.csv("final-project/data/election/election.csv") %>% as.tbl
+census_meta = read.csv("final-project/data/census/metadata.csv", sep = ";") %>% as.tbl
+census = read.csv("final-project/data/census/census.csv") %>% as.tbl
+census$CensusTract = as.factor(census$CensusTract)
+```
+
+## Election data
+
+Following is the first few rows of the `election.raw` data:
+```{r, echo=FALSE}
+kable(election.raw %>% head)
+```
+
+In our dataset, `fips` values denote the area (US, state, or county) that each row of data represents: i.e., some rows in `election.raw` are summary rows. These rows have `county` value of `NA`. There are two kinds of summary rows:
+
+* Federal-level summary rows have `fips` value of `US`.
+* State-level summary rows have names of each state as `fips` value.
+
+## Census data
+
+Following is the first few rows of the `census` data:
+```{r, echo=FALSE}
+kable(census[,1:12] %>% head)
+kable(census[,13:21] %>% head)
+kable(census[,22:30] %>% head)
+kable(census[,31:37] %>% head)
+```
+
+### Census data: column metadata
+
+Column information is given in `metadata`.
+```{r, dependson=data, echo=FALSE}
+kable(census_meta)
+```
+
+## Data wrangling
+4. Remove summary rows from `election.raw` data: i.e.,
+
+    * Federal-level summary into a `election_federal`.
+
+    * State-level summary into a `election_state`.
+    
+    * Only county-level data is to be in `election`.
+    
+```{r}
+election <- election.raw[!is.na(as.numeric(election.raw$county)), ]
+
+election_federal <- election.raw[election.raw$fips == "US",]
+
+election_state <- election.raw[election.raw$fips != "US",]
+election_state <- election_state[is.na(election_state$county),]
+# We have duplicated data, AZ, fips 46102 has unknown county, and DC is not a state.
+election_state <- election_state[election_state$fips != "2000",]
+election_state <- election_state[election_state$state != "DC",]
+election_state <- election_state[election_state$fips != "46102",]
+```
+
+
+5. How many named presidential candidates were there in the 2016 election? Draw a bar chart of all votes received by each candidate
+
+There are 31 named presidential candidates in the 2016 election.
+
+```{r}
+graph.votes <- election_state[,c(3,5)] 
+graph.votes <- graph.votes %>% group_by(candidate) %>% summarise_at(vars(votes), funs(sum(votes)))
+ggplot(graph.votes, aes(x=candidate, y=votes)) + geom_bar(stat = "identity") + coord_flip()
+```
+
+
+6. Create variables `county_winner` and `state_winner` by taking the candidate with the highest proportion of votes. 
+  Hint: to create `county_winner`, start with `election`, group by `fips`, compute `total` votes, and `pct = votes/total`. 
+  Then choose the highest row using `top_n` (variable `state_winner` is similar).
+  
+    
+## Visualization
+
+```{r}
+county_votes  <- election %>% group_by(fips) %>% add_tally(votes) %>% group_by(fips, candidate) %>% summarise_at(vars(pct = votes), funs(. / n))
+county_winner <- merge(election , county_votes, by = c("fips", "candidate"))
+county_winner <- county_winner %>% group_by(fips) %>% top_n(1, pct )
+
+state_votes  <- election_state %>% group_by(fips) %>% add_tally(votes) %>% group_by(fips, candidate) %>% summarise_at(vars(pct = votes), funs(. / n))
+state_winner <- merge(election_state , state_votes, by = c("fips", "candidate"))
+state_winner <- state_winner %>% group_by(fips) %>% top_n(1, pct )
+```
+
+Visualization is crucial for gaining insight and intuition during data mining. We will map our data onto maps.
+
+The R package `ggplot2` can be used to draw maps. Consider the following code.
+```{r, message=FALSE, warning= F}
+states = map_data("state")
+
+ggplot(data = states) + 
+  geom_polygon(aes(x = long, y = lat, fill = region, group = group), color = "white") + 
+  coord_fixed(1.3) +
+  guides(fill=FALSE)
+```
+
+The variable `states` contain information to draw white polygons, and fill-colors are determined by `region`.
+
+7. Draw county-level map by creating `counties = map_data("county")`. Color by county
+```{r}
+counties = map_data("county")
+
+ggplot(data = counties) + 
+  geom_polygon(aes(x = long, y = lat, fill = subregion, group = group), color = "white") + 
+  coord_fixed(1.3) +
+  guides(fill=FALSE) +
+  geom_path(aes(x = states$long, y = states$lat, group = group), data = states , colour = "black")
+```
+
+
+8. Now color the map by the winning candidate for each state. 
+  First, combine `states` variable and `state_winner` we created earlier using `left_join()`. 
+  Note that `left_join()` needs to match up values of states to join the tables; however, they are in different formats: e.g. `AZ` vs. `arizona`.
+  Before using `left_join()`, create a common column by creating a new column for `states` named
+  `fips = state.abb[match(some_column, some_function(state.name))]`. 
+  Replace `some_column` and `some_function` to complete creation of this new column. Then `left_join()`.
+  Your figure will look similar to state_level [New York Times map](https://www.nytimes.com/elections/results/president).
+```{r, message=F, warning = F}
+states = map_data("state")
+fips = state.abb[match(states$region, casefold(state.name))]
+states$region <- fips
+new <- left_join(states, state_winner, by = c("region" = "fips" ))
+
+ggplot(data = new) + 
+  geom_polygon(aes(x = long, y = lat, fill = candidate, group = group), color = "white") + 
+  coord_fixed(1.3)+
+  ggtitle("Map of Winning Candidate by State")+
+  labs(y="Latitude", x = "Longitude")+
+  guides(fill=guide_legend(title="Candidate"))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+9. The variable `county` does not have `fips` column. So we will create one by pooling information from `maps::county.fips`.
+  Split the `polyname` column to `region` and `subregion`. Use `left_join()` combine `county.fips` into `county`. 
+  Also, `left_join()` previously created variable `county_winner`. 
+  Your figure will look similar to county-level [New York Times map](https://www.nytimes.com/elections/results/president).
+```{r, message = F, warning = F}
+county = map_data("county")
+county.str <- maps::county.fips
+y <- unlist(strsplit(county.str$polyname, ","))
+
+region <- NULL
+subregion <-  NULL
+for(i in seq(1,length(y), by = 2)){
+  region <- c(region, y[i])}
+
+for(i in seq(2,length(y), by = 2)){
+  subregion <- c(subregion, y[i])}
+
+
+county.str <- cbind(county.str, region)
+county.str <- cbind(county.str, subregion)
+county.str <- county.str[,c(1,3,4)]
+
+county <- left_join(county, county.str, by = c("region","subregion"))
+county$fips <- as.factor(county$fips)
+county <- left_join(county, county_winner, by = "fips")
+
+
+ggplot(data = county) + 
+  geom_polygon(aes(x = long, y = lat, fill = candidate, group = group), color = "white") + 
+  coord_fixed(1.3)+
+  ggtitle("Map of Winning Candidate by County")+
+  labs(y="Latitude", x = "Longitude")+
+  guides(fill=guide_legend(title="Candidate"))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  geom_path(aes(x = states$long, y = states$lat, group = group), data = states , colour = "black")
+```
+
+
+  
+10. Create a visualization of your choice using `census` data. Many exit polls noted that 
+    [demographics played a big role in the election](https://fivethirtyeight.com/features/demographics-not-hacking-explain-the-election-results/).
+    Use [this Washington Post article](https://www.washingtonpost.com/graphics/politics/2016-election/exit-polls/) 
+    and [this R graph gallery](https://www.r-graph-gallery.com/) for ideas and inspiration.
+    
+    
+```{r}
+plot.10 <- na.omit(census)
+plot.10 <- plot.10 %>% group_by(State) %>% add_tally(TotalPop)
+plot.10 <- cbind(plot.10, Weight = plot.10$TotalPop/plot.10$n )
+plot.10 <- plot.10 %>% group_by(State) %>% summarise_at(vars(Income), funs(sum(. * Weight)))
+ggplot(plot.10, aes(x=State, y=Income)) + geom_bar(stat = "identity") + coord_flip()
+
+# From this graph we can see that some states are making way more income than others. 
+```
+
+
+11. The `census` data contains high resolution information (more fine-grained than county-level).  
+    In this problem, we aggregate the information into county-level data by 
+    computing `TotalPop`-weighted average of each attributes for each county. Create the following variables:
+    
+    * _Clean census data `census.del`_: 
+      start with `census`, filter out any rows with missing values, 
+      convert {`Men`, `Employed`, `Citizen`} attributes to a percentages (meta data seems to be inaccurate), 
+      compute `Minority` attribute by combining {Hispanic, Black, Native, Asian, Pacific}, remove {`Walk`, `PublicWork`, `Construction`}.  
+      _Many columns seem to be related, and, if a set that adds up to 100%, one column will be deleted._  
+```{r}
+census.del <- na.omit(census)
+# New Col Minority
+Minority <- rowSums(census.del[,c(7,9,10,11,12)])
+#names(census.del[,c(6,7,9,10,11,12,23,28,34)])
+# Cleaning Data
+census.del <- census.del[,-c(6,7,9,10,11,12,23,28,34)]
+# Converting to % and rounding to be consistant with data
+# paste(round((census.del$Citizen/census.del$TotalPop)*100,2), "%")
+census.del$Men      <- round((census.del$Men/census.del$TotalPop)*100,1)
+census.del$Employed <- round((census.del$Employed/census.del$TotalPop) * 100,1)
+census.del$Citizen  <- round((census.del$Citizen/census.del$TotalPop) *100,1)
+
+census.del <- cbind(census.del, Minority)
+```     
+
+    * _Sub-county census data, `census.subct`_: 
+      start with `census.del` from above, `group_by()` two attributes {`State`, `County`}, 
+      use `add_tally()` to compute `CountyTotal`. Also, compute the weight by `TotalPop/CountyTotal`.
+```{r}
+census.subct <- census.del %>% group_by(State,County) %>% add_tally(TotalPop)
+census.subct <- cbind(census.subct, Weight =census.subct$TotalPop/census.subct$n)
+```
+
+    * _County census data, `census.ct`_: 
+      start with `census.subct`, use `summarize_at()` to compute weighted sum
+```{r}
+census.ct <- census.subct %>% group_by(State, County) %>% summarize_at(vars(TotalPop:Minority), funs(sum(. * Weight)))
+census.ct <- as.data.frame(census.ct)
+#removing tally and weight columns from census.subct because they are not meaningful attributes.
+census.subct <- census.subct[,-c(30,31)]
+```
+
+
+    * _Print few rows of `census.ct`_: 
+```{r}
+head(census.ct)
+```
+
+## Dimensionality reduction
+12. Run PCA for both county & sub-county level data. Save the principal components data frames, call them ct.pc and subct.pc, respectively. What are the most prominent loadings of the first two principal components PC1 and PC2?
+
+For ct.pc, PCA2 is more prominent since it has higher coefficients and for subct.pc, PCA1 is more prominent. 
+
+```{r}
+# SCALE DATA BEFORE PCA!
+(ct.pc <- prcomp(census.ct[,-c(1,2)], scale. = T , center= T))
+ct.pc.loads <- ct.pc$rotation
+ct.pc <- ct.pc$x
+#colSums(abs(ct.pc.loads[,1:2]))
+
+(subct.pc <- prcomp(census.subct[,-c(1,2,3)], scale. = T , center = T))
+subct.pc.loads <- subct.pc$rotation
+subct.pc <- subct.pc$x
+#colSums(abs(subct.pc.loads[,1:2]))
+```
+
+# Clustering
+
+13. With `census.ct`, perform hierarchical clustering using a Euclidean distance metric 
+    complete linkage to find 10 clusters. Repeat clustering process with the first 5 principal components of `ct.pc`.
+    Compare and contrast clusters containing San Mateo County. Can you hypothesize why this would be the case?
+    
+From the tables below, the average Income, IncomeErr, IncomePerCap, IncomePerCapErr, Professional, Transit, and Employed for the cluster with San Mateo are higher than average which casues them to be in the same cluster. The Cluster also has less average Poverty, ChildPoverty, Production, and Unemployment. From this analysis we can hypothesis that people living in these areas are higher class since they have more income and employed as management jobs. 
+```{r}
+# Hierarchical clustering with all principle component
+ct.pc.all <- prcomp(census.ct[,c(-1,-2)], scale. = T, center = T)
+dist.ct.pc.all <-  dist(ct.pc.all$x, method = "euclidean")
+hc.c.all <- hclust(dist.ct.pc.all, method = "complete")
+partition.c.all <- cutree(hc.c.all, k = 10)
+
+
+# Hierarchical clustering with 5 principle component
+ct.pc.5 <- prcomp(census.ct[,c(-1,-2)], scale. = T, center = T)
+dist.ct.pc.5 <-  dist(ct.pc.5$x[,c(1:5)], method = "euclidean")
+hc.c.5 <- hclust(dist.ct.pc.5, method = "complete")
+partition.c.5 <- cutree(hc.c.5, k = 10)
+
+
+pca.san.mateo.all <-  (ct.pc.all$x %*% ct.pc.all$rotation) %*% t(ct.pc.all$rotation)
+pca.san.mateo.all <- as.data.frame(cbind(pca.san.mateo.all,partition.c.all))
+average.comparison.all <- as.matrix(rbind(colMeans(census.ct[which(pca.san.mateo.all$partition.c.all == partition.c.all[which(census.ct[,2] == "San Mateo")]),][-c(1,2)]), colMeans(census.ct[-c(1,2)])))
+Average <- c("San Mateo Cluster", " Total")
+average.comparison.all <- as.data.frame(cbind(Average , average.comparison.all))
+
+
+
+pca.san.mateo.5 <- (ct.pc.5$x %*% ct.pc.5$rotation) %*% t(ct.pc.5$rotation)
+pca.san.mateo.5 <- as.data.frame(cbind(pca.san.mateo.5, partition.c.5))
+average.comparison.5 <- as.matrix(rbind(colMeans(census.ct[which(pca.san.mateo.5$partition.c.5 == partition.c.5[which(census.ct[,2] == "San Mateo")]),][-c(1,2)]), colMeans(census.ct[-c(1,2)])))
+average.comparison.5 <- as.data.frame(cbind(Average , average.comparison.5))
+
+average.comparison.all
+average.comparison.5
+```
+
+
+
+# Classification
+
+In order to train classification models, we need to combine `county_winner` and `census.ct` data.
+This seemingly straightforward task is harder than it sounds. 
+Following code makes necessary changes to merge them into `election.cl` for classification.
+```{r}
+tmpwinner = county_winner %>% ungroup %>%
+  mutate(state = state.name[match(state, state.abb)]) %>%               ## state abbreviations
+  mutate_at(vars(state, county), tolower) %>%                           ## to all lowercase
+  mutate(county = gsub(" county| columbia| city| parish", "", county))  ## remove suffixes
+tmpcensus = census.ct %>% mutate_at(vars(State, County), tolower)
+
+election.cl = tmpwinner %>%
+  left_join(tmpcensus, by = c("state"="State", "county"="County")) %>% 
+  na.omit
+
+## saves meta information to attributes
+attr(election.cl, "location") = election.cl %>% dplyr::select(c(county, fips, state, votes, pct))
+election.cl = election.cl %>% dplyr::select(-c(county, fips, state, votes, pct))
+```
+
+Using the following code, partition data into 80% training and 20% testing:
+```{r}
+set.seed(10) 
+n = nrow(election.cl)
+in.trn= sample.int(n, 0.8*n) 
+trn.cl = election.cl[ in.trn,]
+tst.cl = election.cl[-in.trn,]
+```
+
+Using the following code, define 10 cross-validation folds:
+```{r}
+set.seed(20) 
+nfold = 10
+folds = sample(cut(1:nrow(trn.cl), breaks=nfold, labels=FALSE))
+```
+
+Using the following error rate function:
+```{r}
+calc_error_rate = function(predicted.value, true.value){
+  return(mean(true.value!=predicted.value))
+}
+records = matrix(NA, nrow=3, ncol=2)
+colnames(records) = c("train.error","test.error")
+rownames(records) = c("tree","knn","lda")
+```
+
+## Classification: native attributes
+
+13. Decision tree: train a decision tree by `cv.tree()`. Prune tree to minimize misclassification. Be sure to use the `folds` from above for cross-validation. Visualize the trees before and after pruning. Save training and test errors to `records` variable.  
+```{r}
+trn.cl.tree <- tree(candidate ~ . ,data = trn.cl, method = "class")
+cv.trn.cl.tree <-  cv.tree(trn.cl.tree, rand = folds, method = "misclass", K = nfold)
+draw.tree(trn.cl.tree, nodeinfo=T, cex = .5)
+best.size <- min(cv.trn.cl.tree$size[cv.trn.cl.tree$dev==min(cv.trn.cl.tree$dev)])
+trn.cl.tree.pruned <- prune.tree(trn.cl.tree, best = best.size)
+draw.tree(trn.cl.tree.pruned, nodeinfo=T, cex = .5)
+Predict.tree.train <- predict(trn.cl.tree.pruned, trn.cl , type = "class")
+Predict.tree.test <- predict(trn.cl.tree.pruned, tst.cl, type = "class")
+
+records[1,1] <- calc_error_rate(Predict.tree.train, trn.cl$candidate)
+records[1,2] <- calc_error_rate(Predict.tree.test, tst.cl$candidate)
+```
+
+    
+14. K-nearest neighbor: train a KNN model for classification. Use cross-validation to determine the best number of neighbors, and plot number of neighbors vs. resulting training and validation errors. Compute test error and save to `records`.  
+```{r}
+trn.x <- trn.cl %>% dplyr::select(-candidate)
+trn.y <- trn.cl$candidate
+kvec  <- 1:50
+
+set.seed(2)
+
+do.chunk <- function(chunkid, folddef, Xdat, Ydat, k){
+train = (folddef!=chunkid)
+  
+X.Train       =  Xdat[train,]
+X.Validation  =  Xdat[!train,]
+Y.Train       =  Ydat[train]
+Y.Validation  =  Ydat[!train]
+
+Predict.Y.Train      =  knn(train = X.Train, test = X.Train,   cl = Y.Train, k = k)
+Predict.Y.Validation =  knn(train = X.Train, test = X.Validation, cl = Y.Train, k = k)
+
+data <- data.frame(train.error = calc_error_rate(Predict.Y.Train, Y.Train), 
+           val.error   = calc_error_rate(Predict.Y.Validation, Y.Validation))
+}
+
+validation.error = NULL
+training.error = NULL
+for(i in  kvec){
+k <- plyr::ldply(1:nfold, do.chunk, folddef = folds , Xdat=trn.x , Ydat=trn.y, k=i )
+validation.error <- c(validation.error, mean(k$val.error))
+training.error <- c(training.error, mean(k$train.error))
+}
+
+par(mfrow=c(1,2))
+plot(validation.error, xlab = "K", type="l")
+plot(training.error, xlab = "K", type="l")
+#The graph shows that the best k is within the range of 1:50 because the validation error starts to increase as k increases.
+
+best.kfold = max(kvec[validation.error == min(validation.error)])
+
+knn.Predict.Train =  knn(train = trn.x, test = trn.x  , cl = trn.y , k = best.kfold)
+knn.Predict.Test =  knn(train = trn.x, test = tst.cl %>% dplyr::select(-candidate) , cl = trn.y, k = best.kfold)
+
+knn.training.error <- calc_error_rate(knn.Predict.Train, trn.cl$candidate)
+knn.test.error     <- calc_error_rate(knn.Predict.Test, tst.cl$candidate)
+records[2,1] <- knn.training.error
+records[2,2] <- knn.test.error
+
+
+```
+
+## Classification: principal components
+
+Instead of using the native attributes, we can use principal components in order to train our classification models. After this section, a comparison will be made between classification model performance between using native attributes and principal components.  
+```{r}
+pca.records = matrix(NA, nrow=3, ncol=2)
+colnames(pca.records) = c("train.error","test.error")
+rownames(pca.records) = c("tree","knn","lda")
+```
+
+15. Compute principal components from the independent variables in training data. Then, determine the number of minimum number of PCs needed to capture 90% of the variance. Plot proportion of variance explained.
+We need at least 14 principle component to explain at least 90% of the variance.
+```{r}
+(trn.cl.pc <- prcomp(trn.cl[-1], center = T , scale. = T))
+trn.cl.pc.sum <- summary(trn.cl.pc)
+trn.cl.pc.sum$importance[3,] >= .9
+plot(trn.cl.pc.sum$importance[2,], type="l")
+```
+
+16. Create a new training data by taking class labels and principal components. Call this variable `tr.pca`. Create the test data based on principal component loadings: i.e., transforming independent variables in test data to principal components space. Call this variable `test.pca`.
+```{r}
+#PCA training set
+tr.pca <- as.data.frame(cbind(V = trn.cl$candidate, trn.cl.pc$x[,1:14]))
+#levels(trn.cl$candidate)[c(7,13)]
+tr.pca$V[tr.pca$V == 7] <-  0  #"Donald Trump"
+tr.pca$V[tr.pca$V == 13] <- 1  #"Hillary Clinton"
+tr.pca$V <- as.factor(tr.pca$V)
+
+#PCA test set
+#test.pca <- predict(trn.cl.pc, newdata = tst.cl) #Does the same thing below: 
+test.pca <- scale(tst.cl[-1], center = attr(scale(trn.cl[-1]),"scaled:center"), scale = attr(scale(trn.cl[-1]),"scaled:scale"))
+test.pca <- test.pca %*% trn.cl.pc$rotation 
+#---------------------------------------------------------
+test.pca <- predict(trn.cl.pc, newdata = tst.cl)
+test.pca <- as.data.frame(cbind(V = tst.cl$candidate, test.pca[,1:14]))
+#levels(tst.cl$candidate)[c(7,13)]
+test.pca$V[test.pca$V == 7] <-  0  #"Donald Trump"
+test.pca$V[test.pca$V == 13] <- 1  #"Hillary Clinton" 
+test.pca$V <- as.factor(test.pca$V)
+
+
+```
+
+
+17. Decision tree: repeat training of decision tree models using principal components as independent variables. Record resulting errors.
+```{r}
+tr.pca.tree <- tree(V ~ . ,data = tr.pca, method = "class")
+cv.tr.pca.tree <-  cv.tree(tr.pca.tree, rand = folds, method = "misclass", K = nfold)
+pca.best.size <- min(cv.tr.pca.tree$size[cv.tr.pca.tree$dev==min(cv.tr.pca.tree$dev)])
+tr.pca.tree.pruned <- prune.tree(tr.pca.tree, best = pca.best.size)
+Predict.pca.tree.train <- predict(tr.pca.tree.pruned, tr.pca , type = "class")
+Predict.pca.tree.test <- predict(tr.pca.tree.pruned, test.pca, type = "class")
+
+pca.records[1,1] <- calc_error_rate(Predict.pca.tree.train, tr.pca$V)
+pca.records[1,2] <- calc_error_rate(Predict.pca.tree.test, test.pca$V)
+```
+
+   
+18. K-nearest neighbor: repeat training of KNN classifier using principal components as independent variables. Record resulting errors.  
+```{r}
+pca.trn.x  <- tr.pca %>% dplyr::select(-V)
+pca.trn.y  <- tr.pca$V
+
+set.seed(2)
+
+pca.validation.error = NULL
+pca.training.error = NULL
+for(i in  kvec){
+pca.k <- plyr::ldply(1:nfold, do.chunk, folddef = folds , Xdat= pca.trn.x , Ydat= pca.trn.y, k=i )
+pca.validation.error <- c(pca.validation.error, mean(pca.k$val.error))
+pca.training.error <- c(pca.training.error, mean(pca.k$train.error))
+}
+
+par(mfrow=c(1,2))
+plot(pca.validation.error, xlab = "K", type="l")
+plot(pca.training.error, xlab = "K" , type="l")
+#The graph shows that the best k is within the range of 1:50 because the validation error is increasing as k increases.
+
+pca.best.kfold = min(kvec[pca.validation.error == min(pca.validation.error)])
+
+
+knn.Predict.Train.pca =  knn(train = pca.trn.x, test = pca.trn.x  , cl = pca.trn.y , k = pca.best.kfold)
+
+knn.Predict.Test.pca =  knn(train = pca.trn.x, test = test.pca %>% dplyr::select(-V) , cl = pca.trn.y, k = pca.best.kfold)
+
+
+pca.records[2,1] <- calc_error_rate(knn.Predict.Train.pca, tr.pca$V)
+pca.records[2,2] <- calc_error_rate(knn.Predict.Test.pca, test.pca$V)
+```
+
+
+# Interpretation & Discussion
+
+19. This is an open question. Interpret and discuss any insights gained and possible explanations. Use any tools at your disposal to make your case: visualize errors on the map, discuss what does/doesn't seems reasonable based on your understanding of these methods, propose possible directions (collecting additional data, domain knowledge, etc)
+
+The dataset: 
+1. There was a duplicate observation for the state AZ and SD for state level so it was removed.
+2. Although DC is specified to be part of the state, DC was removed since it does not belong in our data which is supposed to be a state level. 
+
+How these errors were found is fromt he codes below:
+```{r}
+election_state <- election.raw[election.raw$fips != "US",]
+election_state <- election_state[is.na(election_state),]
+state_votes <- election_state %>% group_by(fips) %>% add_tally(votes) %>% group_by(fips, candidate) %>% summarise_at(vars(pct = votes), funs(. / n))
+state_winner <- merge(election_state , state_votes, by = c("fips", "candidate"))
+state_winner <- state_winner %>% group_by(fips) %>% top_n(1, pct )
+# Grouping candidate winners by state, without removing any data. 
+
+length(factor(state_winner$state))
+# We have 53 levels instead of the 50 levels since there are 50 states.
+
+state_winner$state[which(duplicated(state_winner$state))]
+# By this command we found that there were 2 duplicates AK and SD
+
+election_state <- election_state[election_state$fips != "2000",]
+election_state <- election_state[election_state$fips != "46102",]
+state_votes <- election_state %>% group_by(fips) %>% add_tally(votes) %>% group_by(fips, candidate) %>% summarise_at(vars(pct = votes), funs(. / n))
+state_winner <- merge(election_state , state_votes, by = c("fips", "candidate"))
+state_winner <- state_winner %>% group_by(fips) %>% top_n(1, pct )
+# The states were AK and SD so they were moved from the original data.
+
+length(factor(state_winner$state))
+# We did one more check to make sure we have 50 states, but we have 51 levels still.
+
+state_winner$state[c(which(state_winner$state %in% state.abb == F))]
+# We found that DC is not a state
+
+election_state <- election_state[election_state$state != "DC",]
+state_votes <- election_state %>% group_by(fips) %>% add_tally(votes) %>% group_by(fips, candidate) %>% summarise_at(vars(pct = votes), funs(. / n))
+state_winner <- merge(election_state , state_votes, by = c("fips", "candidate"))
+state_winner <- state_winner %>% group_by(fips) %>% top_n(1, pct )
+# The state DC was removed from the original data.
+
+length(factor(state_winner$state))
+# Now we have 50 states!
+
+```
+
+
+Visualization:
+1. #5 is an inacurate visualization of total votes recieved by each candidate because our data set is incomplete. 
+2. Map of candidate won by state is a complete visualization
+3. Map of candidate won by county has a few grey coloring because our data is incomplete for those areas. We would need to collect data specific to those counties to complete the map.
+```{r}
+county.str <- maps::county.fips
+length(factor(unique(county.str$fips)))
+length(factor(unique(election$fips)))
+county.str$fips[c(which(unique(election$fips) %in% unique(county.str$fips) == F ))]
+
+# Missing counties by fip number, thus we have an incomplete data
+```
+
+
+Prediction model:
+1. The knn for PCA resulted in the best model. We can reduce our dimensions to 14 PC and get accurate predictions.  
+```{r}
+records
+pca.records
+```
+2. The lowest test error is the knn for PCA within our analysis methods, so this would be the best method out of knn, tree, and tree PCA.
+3. LDA was not computed yet check #20 for further analysis.
+
+# Taking it further
+
+20. Propose and tackle at least one interesting question. Be creative! Some possibilities are:
+
+```{r, message= F, warning=F}
+
+trn.cl.lda <- MASS::lda(candidate ~ . , data = trn.cl)
+
+ypred.train.lda <- predict(trn.cl.lda,trn.cl)$class
+ypred.test.lda <- predict(trn.cl.lda,tst.cl)$class
+
+records[3,1] <- calc_error_rate(ypred.train.lda, trn.cl$candidate)
+records[3,2] <- calc_error_rate(ypred.test.lda, tst.cl$candidate)
+# The LDA gives a low test error but it is not pratical, so we are going to perfrom PCA to see if we can reduce the dimensions with at least 90% of the variance explained
+
+
+trn.cl.pca.lda <- MASS::lda(V ~ . , data = tr.pca) 
+
+ypred.train.pca.lda <- predict(trn.cl.pca.lda,tr.pca)$class
+ypred.test.pca.lda <- predict(trn.cl.pca.lda,test.pca)$class
+
+pca.records[3,1] <- calc_error_rate(ypred.train.pca.lda, tr.pca$V)
+pca.records[3,2] <- calc_error_rate(ypred.test.pca.lda, test.pca$V)
+
+records
+pca.records
+ 
+```
+ 
+
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
